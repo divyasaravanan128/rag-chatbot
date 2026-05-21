@@ -2,7 +2,7 @@
 
 A retrieval-augmented generation chatbot that answers questions over uploaded documents. Built with a hybrid BM25 + semantic retrieval pipeline, streaming responses, and evaluated with RAGAS.
 
-**Live demo:** [your-app.streamlit.app](https://your-app.streamlit.app)
+**Live demo:** [rag-chatbot-divya-s.streamlit.app]([https://rag-chatbot-divya-s.streamlit.app/])
 
 ---
 
@@ -83,31 +83,7 @@ BM25Okapi index rebuild    ← stored in session_state (RAM)
 | OCR | pytesseract + pdf2image | Handles scanned/image-based PDFs |
 | Text splitting | langchain-text-splitters | Adaptive chunking by document type |
 
----
 
-## Design decisions
-
-**Why hybrid search?**
-
-Pure semantic search fails on exact identifiers — clause numbers, product codes, proper nouns. A query like "What does Annexure 1C say?" may return topically similar chunks while missing the chunk that literally contains "Annexure 1C". BM25 catches these exact matches via IDF-weighted term frequency. RRF merges both ranked lists without needing to reconcile incompatible score scales.
-
-**Why RRF over weighted score combination?**
-
-BM25 scores are unbounded floats; ChromaDB returns cosine distances (0–2). Adding or normalising them introduces arbitrary weighting assumptions. RRF discards raw scores entirely and uses only rank positions — a chunk that ranks well in both retrievers wins, regardless of absolute scores.
-
-**Why adaptive chunk sizes?**
-
-Legal and warranty documents are clause-dense. An 800-char chunk merges unrelated clauses, causing retrieval to return a chunk that's mostly irrelevant to the query. 300-char chunks keep individual clauses isolated. Narrative documents benefit from larger chunks that preserve context across sentences.
-
-**Why trim at the call site, not inside stream_response()?**
-
-Single responsibility. `stream_response()` is a pure generator — it receives history and chunks, yields tokens. Conversation state management (what to send, when to trim) belongs at the call site in the Streamlit chat loop. This makes both functions independently testable.
-
-**Why rebuild BM25 on every ingest, not append?**
-
-BM25's IDF scores depend on word frequency across the entire corpus. Adding new chunks changes these frequencies — a word that was rare may become common. Partial updates would produce incorrect scores. Full rebuild from all ChromaDB chunks is the only correct approach.
-
----
 
 ## Evaluation (RAGAS)
 
@@ -126,56 +102,6 @@ Evaluated on 12 hand-written Q&A pairs covering the warranty document. Questions
 
 ---
 
-## Setup
-
-**Prerequisites:** Python 3.11+, Tesseract OCR, Poppler
-
-```bash
-# Clone
-git clone https://github.com/divyasaravanan128/rag-chatbot
-cd rag-chatbot
-
-# Environment
-python -m venv venv
-venv\Scripts\activate        # Windows
-source venv/bin/activate     # Mac/Linux
-
-# Dependencies
-pip install -r requirements.txt
-
-# Environment variables
-cp .env.example .env
-# Add your ANTHROPIC_API_KEY to .env
-```
-
-**Windows system dependencies:**
-- Tesseract: https://github.com/UB-Mannheim/tesseract/wiki
-- Poppler: https://github.com/oschwartz10612/poppler-windows/releases
-
-**Run:**
-```bash
-streamlit run app.py
-```
-
----
-
-## Project structure
-
-```
-rag-chatbot/
-├── app.py                  # Main Streamlit app
-├── reingest.py             # Utility — clears ChromaDB for fresh ingest
-├── requirements.txt
-├── packages.txt            # System deps for Streamlit Cloud
-├── .env.example
-├── eval/
-│   ├── questions.py        # 12 Q&A pairs with ground truth
-│   ├── run_eval.py         # RAGAS evaluation runner
-│   └── results.csv         # Scores per question (git-ignored)
-└── docs/                   # Uploaded documents (git-ignored)
-```
-
----
 
 ## Known limitations and next steps
 
@@ -186,11 +112,3 @@ rag-chatbot/
 - No re-ranking step (cross-encoder) after hybrid retrieval — adding one would likely improve context precision
 
 ---
-
-## Built as part of an 8-week AI Engineering sprint
-
-Weeks 1–4: environment setup, embeddings, ChromaDB retrieval, Streamlit chat UI
-Week 5: streaming, context window management
-Week 6: hybrid search (BM25 + RRF)
-Week 7: RAGAS evaluation
-Week 8: deployment
