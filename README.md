@@ -56,7 +56,7 @@ Upload (PDF / TXT)
     │
     ├── PyMuPDF (fitz) → direct text extraction
     │       │
-    │       └── if empty → pdf2image + pytesseract (OCR fallback)
+    │       └── if empty → pdf2image + pytesseract (OCR fallback unavailable)
     │
     ▼
 RecursiveCharacterTextSplitter
