@@ -2,25 +2,26 @@
 
 A retrieval-augmented generation chatbot that answers questions over uploaded documents. Built with a hybrid BM25 + semantic retrieval pipeline, streaming responses, and evaluated with RAGAS.
 
-**Live demo:** [rag-chatbot-divya-s.streamlit.app]([https://rag-chatbot-divya-s.streamlit.app/])
+Live demo: rag-chatbot-divya-s.streamlit.app
 
 ---
 
-## What it does
+# What it does
 
-Upload a PDF or TXT file, ask questions in natural language, and get answers grounded in the document — with source chunk previews so you can verify every response.
+Upload a PDF or TXT file, ask questions in natural language, and get answers grounded in the document — with source chunk previews so responses remain verifiable.
 
 Key behaviours:
+
 - Refuses to answer from outside the document ("The document does not mention this.")
 - Streams tokens live as they generate
 - Filters retrieval by source document when multiple files are loaded
-- Handles image-based PDFs via OCR fallback
+- Supports hybrid retrieval (BM25 + semantic search)
+- Supports OCR locally for scanned/image-based PDFs when Tesseract + Poppler are installed
 
 ---
 
-## Architecture
+# Architecture
 
-```
 User query
     │
     ▼
@@ -47,16 +48,17 @@ Top-k chunks (N_RESULTS=5)
     │
     ▼
 st.write_stream() → live token rendering
-```
 
-### Document ingestion pipeline
+---
 
-```
+# Document ingestion pipeline
+
 Upload (PDF / TXT)
     │
     ├── PyMuPDF (fitz) → direct text extraction
     │       │
-    │       └── if empty → pdf2image + pytesseract (OCR fallback unavailable)
+    │       └── if insufficient text:
+    │              pdf2image → pytesseract OCR fallback
     │
     ▼
 RecursiveCharacterTextSplitter
@@ -66,28 +68,27 @@ RecursiveCharacterTextSplitter
     ▼
 ChromaDB.upsert()          ← persisted to disk
 BM25Okapi index rebuild    ← stored in session_state (RAM)
-```
 
 ---
 
-## Stack
+# Stack
 
 | Layer | Technology | Why |
 |---|---|---|
 | LLM | Anthropic Claude Sonnet | Streaming API, strong instruction following |
 | Embeddings | all-mpnet-base-v2 | Strong sentence-level semantic similarity |
-| Vector store | ChromaDB (persistent) | Local, no infra needed, simple API |
+| Vector store | ChromaDB (persistent) | Local, simple API, no external infra |
 | Keyword search | rank_bm25 (BM25Okapi) | Catches exact identifiers semantic search misses |
-| Retrieval merge | Reciprocal Rank Fusion | Scale-agnostic, rewards consistent signal |
-| UI | Streamlit | Fast to build, st.write_stream for live tokens |
-| OCR | pytesseract + pdf2image | Handles scanned/image-based PDFs |
+| Retrieval merge | Reciprocal Rank Fusion | Rewards agreement across retrieval methods |
+| UI | Streamlit | Fast iteration and streaming support |
+| OCR | pytesseract + pdf2image | Local OCR support for scanned PDFs |
 | Text splitting | langchain-text-splitters | Adaptive chunking by document type |
 
+---
 
+# Evaluation (RAGAS)
 
-## Evaluation (RAGAS)
-
-Evaluated on 12 hand-written Q&A pairs covering the warranty document. Questions span specific lookups, summaries, out-of-scope queries (faithfulness tests), and reasoning questions.
+Evaluated on 12 hand-written Q&A pairs covering the warranty document.
 
 | Metric | Score | What it measures |
 |---|---|---|
@@ -95,20 +96,30 @@ Evaluated on 12 hand-written Q&A pairs covering the warranty document. Questions
 | Answer Relevancy | 0.692 | Do answers address the question asked? |
 | Context Recall | 0.750 | Does retrieval fetch the right chunks? |
 
-**Observations:**
-- Faithfulness improved from 0.745 → 0.787 after tightening the system prompt to prohibit hallucination phrases
-- Answer Relevancy is the weakest metric — verbose preambles ("Based on the provided context...") pull the score down; further system prompt tuning expected to push this toward 0.75+
-- Context Recall plateau at 0.750 suggests chunk boundary splits in dense PDFs are the limiting factor; increasing chunk_size for warranty docs is the next lever
+## Observations
+
+- Faithfulness improved from 0.745 → 0.787 after tightening grounding instructions in the system prompt
+- Answer Relevancy remains the weakest metric; response verbosity and unnecessary preambles reduce scores
+- Context Recall plateau suggests chunk-boundary fragmentation in dense PDFs
 
 ---
 
+# Known limitations
 
-## Known limitations and next steps
-
-- BM25 index is RAM-only — page refresh on Streamlit Cloud triggers a rebuild from ChromaDB (adds ~2s on first query after refresh)
-- ChromaDB on Streamlit Cloud uses `/tmp` — documents must be re-uploaded each session; a cloud vector store (Pinecone, Weaviate) would fix this
-- Answer Relevancy score (0.692) has room to improve — response formatting and preamble reduction
-- OCR quality depends on scan resolution; low-quality scans produce poor chunks that no retrieval strategy can fully recover from
-- No re-ranking step (cross-encoder) after hybrid retrieval — adding one would likely improve context precision
+- Streamlit Cloud deployment currently does NOT support OCR because Tesseract and Poppler system binaries are unavailable in the hosted environment
+- Scanned/image-only PDFs therefore cannot be processed in the live demo
+- OCR functionality works locally when Tesseract OCR and Poppler are installed and configured
+- BM25 index is RAM-only and rebuilds from ChromaDB after refresh/redeploy
+- ChromaDB persistence on Streamlit Cloud uses ephemeral storage (`/tmp`)
+- No cross-encoder reranking step after hybrid retrieval
+- Retrieval quality for dense legal PDFs is sensitive to chunking strategy
 
 ---
+
+# Future improvements
+
+- Dockerized deployment with system-level OCR dependencies
+- Cross-encoder reranking for higher context precision
+- Persistent hosted vector database
+- Token-aware conversation summarization
+- Incremental BM25 indexing instead of full rebuilds
