@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .chroma/
 docs/
+chroma_db/
+.streamlit/secrets.toml
+eval/results.csv
