@@ -22,6 +22,7 @@ Key behaviours:
 
 # Architecture
 
+
 User query
     │
     ▼
@@ -48,7 +49,6 @@ Top-k chunks (N_RESULTS=5)
     │
     ▼
 st.write_stream() → live token rendering
-
 ---
 
 # Document ingestion pipeline
