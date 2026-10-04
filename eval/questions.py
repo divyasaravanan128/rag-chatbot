@@ -8,11 +8,11 @@ eval_pairs = [
         "ground_truth": "2 year warranty. Does not cover damage caused by misuse, negligence, or normal wear and tear."
     },
     {
-        "question": "What is the product name listed under Annexure 1C?",
+        "question": "What is the product name listed under Traded Goods Warranty Terms?",
         "ground_truth": "Aurora - 4011-3 Green 3D Geometric Wallpaper"
     },
     {
-        "question": "Who is the vendor mentioned in Annexure 1C?",
+        "question": "Who is the vendor listed under Traded Goods Warranty Terms?",
         "ground_truth": "Excelhome"
     },
     {
@@ -49,7 +49,7 @@ eval_pairs = [
     },
     {
         "question": "Who is the contact person for warranty claims?",
-        "ground_truth": "The document does not mention a contact person for warranty claims."
+        "ground_truth": "No named person is given. Warranty claims go to the HomeLane care team: raise a ticket at www.homelane.com/care, email care@homelane.com, or call 1800-102-4663."
     },
 
     # ── Reasoning question — tests answer relevancy ───────────────────────

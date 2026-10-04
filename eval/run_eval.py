@@ -2,7 +2,6 @@
 
 import sys
 import os
-import re
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from anthropic import Anthropic
@@ -10,21 +9,22 @@ import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from rank_bm25 import BM25Okapi
 from datasets import Dataset
-# imports — replace the ragas-related ones with:
 from ragas import evaluate
 from ragas.metrics import faithfulness, answer_relevancy, context_recall
 from ragas.llms import LangchainLLMWrapper
 from langchain_anthropic import ChatAnthropic
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from anthropic import Anthropic as AnthropicClient
 from dotenv import load_dotenv
 import pandas as pd
 
 from eval.questions import eval_pairs
+from rag_core import (
+    MODEL, NO_MATCH_MESSAGE, SYSTEM_PROMPT, build_messages, hybrid_search, tokenize,
+)
 
 load_dotenv()
 
-# ── Setup clients (mirrors app.py) ────────────────────────────────────────────
+# ── Setup clients ─────────────────────────────────────────────────────────────
 
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -39,44 +39,23 @@ collection = chroma_client.get_or_create_collection(
 all_data = collection.get(include=["documents", "metadatas"])
 all_chunks = all_data["documents"]
 all_metas  = all_data["metadatas"]
-def tokenize(text: str) -> list[str]:
-    return re.findall(r"\w+", text.lower())
-
 bm25_index = BM25Okapi([tokenize(doc) for doc in all_chunks])
 
-# ── Hybrid search (mirrors app.py) ────────────────────────────────────────────
+# ── Retrieval + answers (same code and prompt as app.py, via rag_core) ────────
 
-def hybrid_search(query: str, n_results: int = 5, k: int = 60):
-    bm25_scores = bm25_index.get_scores(tokenize(query))
-    allowed = [i for i in range(len(all_chunks)) if bm25_scores[i] > 0]
-    bm25_ranked = sorted(allowed, key=lambda i: bm25_scores[i], reverse=True)[:n_results * 2]
+def retrieve(question: str) -> tuple[list[str], list[dict]]:
+    return hybrid_search(question, collection, bm25_index, all_chunks, all_metas)
 
-    chroma_results = collection.query(query_texts=[query], n_results=n_results * 2)
-    chroma_docs = chroma_results["documents"][0]
 
-    candidates = {}
-    for rank, idx in enumerate(bm25_ranked):
-        text = all_chunks[idx]
-        candidates[text] = candidates.get(text, 0) + 1 / (k + rank)
-    for rank, doc in enumerate(chroma_docs):
-        candidates[doc] = candidates.get(doc, 0) + 1 / (k + rank)
-
-    ranked = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
-    return [text for text, _ in ranked[:n_results]]
-
-# ── Generate answers ───────────────────────────────────────────────────────────
-
-def get_answer(question: str, context_chunks: list[str]) -> str:
-    system_prompt = (
-        "You are a helpful assistant. Answer questions based only on the provided context.\n"
-        "If the context doesn't contain enough information, say so clearly.\n\n"
-        "Context:\n" + "\n\n".join(context_chunks)
-    )
+def get_answer(question: str, context_chunks: list[str], sources_meta: list[dict]) -> str:
+    if not context_chunks:
+        return NO_MATCH_MESSAGE  # app shows this without calling the model
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=512,
-        system=system_prompt,
-        messages=[{"role": "user", "content": question}],
+        model=MODEL,
+        max_tokens=1024,
+        temperature=0,
+        system=SYSTEM_PROMPT,
+        messages=build_messages(context_chunks, sources_meta, [{"role": "user", "content": question}]),
     )
     return response.content[0].text
 
@@ -88,8 +67,8 @@ rows = []
 for pair in eval_pairs:
     question     = pair["question"]
     ground_truth = pair["ground_truth"]
-    contexts     = hybrid_search(question)
-    answer       = get_answer(question, contexts)
+    contexts, metas = retrieve(question)
+    answer       = get_answer(question, contexts, metas)
 
     print(f"Q: {question[:60]}...")
     print(f"A: {answer[:80]}...\n")
@@ -108,9 +87,12 @@ dataset = Dataset.from_list(rows)
 print("Running RAGAS evaluation...")
 
 # Use Claude as the judge LLM
+# temperature 0 for repeatable scores; room for long statement lists
 ragas_llm = LangchainLLMWrapper(ChatAnthropic(
-    model="claude-sonnet-4-5",
+    model=MODEL,
     api_key=os.getenv("ANTHROPIC_API_KEY"),
+    temperature=0,
+    max_tokens=4096,
 ))
 
 # Use the same embedding model you already have locally — no OpenAI needed

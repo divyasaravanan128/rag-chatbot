@@ -10,6 +10,7 @@ A retrieval-augmented generation chatbot that answers questions over uploaded do
 
 Upload PDF or TXT files, ask questions, and get answers grounded in the documents with source chunk previews.
 
+- Skips questions the documents don't cover: if no chunk is semantically close enough, it says so without calling the model
 - Answers only from retrieved chunks; replies "The document does not mention this." when the answer isn't there
 - Streams tokens live as they generate
 - Remembers the conversation for follow-up questions (oldest turns trimmed past ~100k tokens)
@@ -24,6 +25,9 @@ Upload PDF or TXT files, ask questions, and get answers grounded in the document
 
 ```
 User query
+    │
+    ▼
+ChromaDB (semantic) ── best match too far? ──► "couldn't find relevant information"
     │
     ▼
 BM25 (keyword)  +  ChromaDB (semantic)
@@ -42,6 +46,10 @@ st.write_stream() → live token rendering
 **Adaptive chunking:** files with `warranty`, `contract`, `agreement` or `terms` in the name use 300-character chunks for precise clause lookup; everything else uses 800. Both use 150-character overlap.
 
 **BM25 details:** query and chunks share one tokenizer (lowercase words, punctuation stripped), and only chunks with a real keyword match get RRF credit.
+
+**Relevance threshold:** if the closest chunk's cosine distance is above 0.65, no chunks are returned and the model isn't called. Calibrated on `Warranty.pdf`: answerable questions scored at most 0.58, off-topic ones at least 0.68. Questions close to the topic but not answered by the document (e.g. "warranty on an iPhone") still pass the threshold and are handled by the model's "does not mention" reply.
+
+**Shared core:** retrieval, the threshold and the prompt live in `rag_core.py`, used by both the app and the eval, so the eval measures exactly what the app does.
 
 **Prompting:** the system prompt holds only the rules. Retrieved chunks go in the latest user message inside `<document>` tags, so instructions hidden in an uploaded file don't get system-level authority.
 
@@ -66,11 +74,13 @@ st.write_stream() → live token rendering
 
 | Metric | Score |
 |---|---|
-| Faithfulness | 0.787 |
-| Answer Relevancy | 0.692 |
-| Context Recall | 0.750 |
+| Faithfulness | 0.932 |
+| Answer Relevancy | 0.789 |
+| Context Recall | 0.917 |
 
-These scores were measured before the October 2026 retrieval fixes (tokenizer, keyword-match filter). Re-run with `python eval/run_eval.py` from the repo root after loading the eval documents.
+Answer Relevancy includes two out-of-scope questions (price, return policy) where the correct reply is "The document does not mention this."; RAGAS always scores that reply 0. Across the 10 answerable questions it is 0.947.
+
+Run with `venv\Scripts\python eval\run_eval.py` from the repo root, with `Warranty.pdf` loaded. Per-question scores are written to `eval/results.csv`.
 
 ---
 
@@ -97,6 +107,7 @@ On Streamlit Cloud, set `ANTHROPIC_API_KEY` in the app's secrets.
 
 ## Known limitations
 
-- No relevance threshold: retrieval always returns the top 5 chunks, so the model, not the retriever, decides when the documents don't answer the question
+- The relevance threshold (0.65) was calibrated on one document and a small question set; other document types may need a different value
+- OCR flattens tables, so table answers from scanned PDFs can mix up columns
 - BM25 index lives in session memory and is rebuilt from ChromaDB when a new session starts
 - On Streamlit Cloud, ChromaDB is stored in `/tmp`: documents are shared by everyone using the app and are lost when the app restarts or sleeps
