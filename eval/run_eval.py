@@ -2,6 +2,7 @@
 
 import sys
 import os
+import re
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from anthropic import Anthropic
@@ -38,15 +39,17 @@ collection = chroma_client.get_or_create_collection(
 all_data = collection.get(include=["documents", "metadatas"])
 all_chunks = all_data["documents"]
 all_metas  = all_data["metadatas"]
-tokenized  = [doc.lower().split() for doc in all_chunks]
-bm25_index = BM25Okapi(tokenized)
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+bm25_index = BM25Okapi([tokenize(doc) for doc in all_chunks])
 
 # ── Hybrid search (mirrors app.py) ────────────────────────────────────────────
 
 def hybrid_search(query: str, n_results: int = 5, k: int = 60):
-    tokenized_query = query.lower().split()
-    bm25_scores = bm25_index.get_scores(tokenized_query)
-    bm25_ranked = sorted(range(len(all_chunks)), key=lambda i: bm25_scores[i], reverse=True)[:n_results * 2]
+    bm25_scores = bm25_index.get_scores(tokenize(query))
+    allowed = [i for i in range(len(all_chunks)) if bm25_scores[i] > 0]
+    bm25_ranked = sorted(allowed, key=lambda i: bm25_scores[i], reverse=True)[:n_results * 2]
 
     chroma_results = collection.query(query_texts=[query], n_results=n_results * 2)
     chroma_docs = chroma_results["documents"][0]
