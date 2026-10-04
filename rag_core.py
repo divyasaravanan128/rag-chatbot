@@ -3,6 +3,7 @@ so the eval measures exactly what the app does."""
 
 from __future__ import annotations
 
+import codecs
 import html
 import os
 import re
@@ -68,10 +69,21 @@ def get_splitter(filename: str) -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
 
 
+def read_text_file(filepath: str) -> str:
+    """Decode UTF-8, UTF-16 (common from Windows Notepad/PowerShell) or Windows-1252 text."""
+    with open(filepath, "rb") as f:
+        raw = f.read()
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def extract_text(filepath: str, filename: str) -> str:
     if filename.lower().endswith(".txt"):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return f.read()
+        return read_text_file(filepath)
 
     # PDF: extract text per page; OCR only the pages with no text layer (scanned)
     pages = []

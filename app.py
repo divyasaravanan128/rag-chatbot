@@ -127,19 +127,29 @@ elif st.session_state.get("bm25_index") is None:
     build_bm25_index()
 
 
-def load_documents(uploaded_files) -> int:
-    """Uploads are written to a temp dir only for text extraction, then deleted."""
-    added = 0
+def load_documents(uploaded_files) -> tuple[int, list[str]]:
+    """
+    Uploads are written to a temp dir only for text extraction, then deleted.
+    A file that fails is reported and skipped; the rest still load.
+    Returns (chunks added, error messages).
+    """
+    added, errors = 0, []
     with tempfile.TemporaryDirectory() as tmp_dir:
         for uf in uploaded_files:
             filename = os.path.basename(uf.name)
             filepath = os.path.join(tmp_dir, filename)
-            with open(filepath, "wb") as f:
-                f.write(uf.getbuffer())
-            added += rag_core.add_document(collection, filepath, filename)
+            try:
+                with open(filepath, "wb") as f:
+                    f.write(uf.getbuffer())
+                n = rag_core.add_document(collection, filepath, filename)
+                if n == 0:
+                    errors.append(f"{filename}: no text found")
+                added += n
+            except Exception as e:
+                errors.append(f"{filename}: {type(e).__name__}: {e}")
 
     build_bm25_index()
-    return added
+    return added, errors
 
 
 def clear_documents():
@@ -249,9 +259,16 @@ with st.sidebar:
 
     if st.button("Load documents", disabled=not uploaded_files):
         with st.spinner("Processing..."):
-            n = load_documents(uploaded_files)
-        st.success(f"Added {n} chunks.")
+            # Kept in session state so the result survives the rerun below
+            st.session_state.load_report = load_documents(uploaded_files)
         st.rerun()
+
+    if report := st.session_state.pop("load_report", None):
+        n, errors = report
+        if n:
+            st.success(f"Added {n} chunks.")
+        for err in errors:
+            st.error(f"Couldn't load {err}")
 
     st.caption(
         "Documents are private to this browser session and are not saved. "
