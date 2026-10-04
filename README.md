@@ -13,7 +13,9 @@ Upload PDF or TXT files, ask questions, and get answers grounded in the document
 - Skips questions the documents don't cover: if no chunk is semantically close enough, it says so without calling the model
 - Answers only from retrieved chunks; replies "The document does not mention this." when the answer isn't there
 - Streams tokens live as they generate
-- Remembers the conversation for follow-up questions (oldest turns trimmed past ~100k tokens)
+- Keeps each user's documents private: every browser session has its own in-memory store, nothing is written to disk, and a session's documents are deleted after 2 hours idle (or with "Remove all documents")
+- Caps API usage: 20 questions per session and 200 per day across all users (both configurable); off-topic questions stopped by the relevance check don't count
+- Remembers the conversation for follow-up questions (oldest turns trimmed past ~20k tokens)
 - Filters retrieval by document when multiple files are loaded
 - Reads scanned PDFs: OCR runs per page, so scanned pages inside otherwise digital PDFs are captured too
 - Re-uploading a file replaces its previous version
@@ -61,7 +63,7 @@ st.write_stream() → live token rendering
 |---|---|
 | LLM | Anthropic Claude Sonnet |
 | Embeddings | all-mpnet-base-v2 |
-| Vector store | ChromaDB (persistent) |
+| Vector store | ChromaDB (in-memory, one collection per session) |
 | Keyword search | rank_bm25 (BM25Okapi) |
 | Retrieval merge | Reciprocal Rank Fusion |
 | OCR | Tesseract + Poppler (pdf2image) |
@@ -74,13 +76,13 @@ st.write_stream() → live token rendering
 
 | Metric | Score |
 |---|---|
-| Faithfulness | 0.932 |
-| Answer Relevancy | 0.789 |
+| Faithfulness | 0.982 |
+| Answer Relevancy | 0.781 |
 | Context Recall | 0.917 |
 
-Answer Relevancy includes two out-of-scope questions (price, return policy) where the correct reply is "The document does not mention this."; RAGAS always scores that reply 0. Across the 10 answerable questions it is 0.947.
+Scores vary a little between runs (faithfulness was 0.932 on the previous run), and in this run the judge couldn't score faithfulness for 1 of the 12 answers. Answer Relevancy includes two out-of-scope questions (price, return policy) where the correct reply is "The document does not mention this."; RAGAS always scores that reply 0. Across the 10 answerable questions it is 0.938.
 
-Run with `venv\Scripts\python eval\run_eval.py` from the repo root, with `Warranty.pdf` loaded. Per-question scores are written to `eval/results.csv`.
+Run with `venv\Scripts\python eval\run_eval.py` from the repo root, with `Warranty.pdf` in `docs/`. The eval loads it with the app's own ingestion code (about 1.5 minutes including OCR) and writes per-question scores to `eval/results.csv`.
 
 ---
 
@@ -103,11 +105,22 @@ OCR needs Tesseract and Poppler:
 
 On Streamlit Cloud, set `ANTHROPIC_API_KEY` in the app's secrets.
 
+Optional settings (in `.env` locally or Streamlit secrets on Cloud):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MAX_QUESTIONS_PER_SESSION` | 20 | Questions one browser session can send to the API |
+| `DAILY_QUESTION_CAP` | 200 | Questions per day (UTC) across all users |
+| `SESSION_TTL_SECONDS` | 7200 | Idle time before a session's documents are deleted |
+
+For a hard spending limit, also set a monthly spend limit for the API key's workspace in the Anthropic Console. The in-app caps reset if the app restarts.
+
 ---
 
 ## Known limitations
 
 - The relevance threshold (0.65) was calibrated on one document and a small question set; other document types may need a different value
 - OCR flattens tables, so table answers from scanned PDFs can mix up columns
-- BM25 index lives in session memory and is rebuilt from ChromaDB when a new session starts
-- On Streamlit Cloud, ChromaDB is stored in `/tmp`: documents are shared by everyone using the app and are lost when the app restarts or sleeps
+- Documents aren't saved: refreshing the page starts a new session, so files must be uploaded again
+- Usage counters live in server memory: they reset when the app restarts, and the per-session cap resets on page refresh (the daily cap is the real limit)
+- All sessions share one server's memory, so many large uploads at once could exhaust RAM on Streamlit Cloud

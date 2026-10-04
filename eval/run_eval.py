@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import pandas as pd
 
 from eval.questions import eval_pairs
+import rag_core
 from rag_core import (
     MODEL, NO_MATCH_MESSAGE, SYSTEM_PROMPT, build_messages, hybrid_search, tokenize,
 )
@@ -28,14 +29,20 @@ load_dotenv()
 
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+EVAL_DOCS = ["docs/Warranty.pdf"]  # the document eval/questions.py is written against
+
 embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-mpnet-base-v2")
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
-collection = chroma_client.get_or_create_collection(
-    name="documents",
+collection = chromadb.EphemeralClient().get_or_create_collection(
+    name="eval",
     embedding_function=embed_fn,
 )
 
-# Build BM25 index from existing collection
+# Ingest with the same code the app uses
+print("Loading documents...")
+for path in EVAL_DOCS:
+    rag_core.add_document(collection, path, os.path.basename(path))
+
+# Build BM25 index from the collection
 all_data = collection.get(include=["documents", "metadatas"])
 all_chunks = all_data["documents"]
 all_metas  = all_data["metadatas"]

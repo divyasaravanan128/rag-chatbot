@@ -1,46 +1,102 @@
 import os
 import html
+import tempfile
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+
 import streamlit as st
 from anthropic import Anthropic
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from dotenv import load_dotenv
-import pytesseract
-from pdf2image import convert_from_path
-import fitz  # PyMuPDF
+from dotenv import dotenv_values
 from rank_bm25 import BM25Okapi
 
 import rag_core
 from rag_core import MODEL, NO_MATCH_MESSAGE, SYSTEM_PROMPT, build_messages, tokenize
 
-load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", "")
-CHROMA_PATH = "/tmp/chroma_db" if os.path.exists("/tmp") else "./chroma_db"
-POPPLER_PATH = r"C:\poppler\Library\bin" if os.name == "nt" else None
+DOTENV = dotenv_values(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-# On Linux/cloud, tesseract is on PATH (installed via packages.txt)
-if os.name == "nt":
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-DOCS_PATH = "./docs"
+def get_setting(name: str, default):
+    """
+    First non-empty value from: environment, .env file, Streamlit secrets.
+    .env is read directly because loading st.secrets copies every secret into
+    os.environ, so an empty secret would otherwise blank a real .env value.
+    """
+    candidates = [os.getenv(name), DOTENV.get(name)]
+    try:
+        candidates.append(st.secrets.get(name))
+    except Exception:  # no secrets file
+        pass
+    return next((v for v in candidates if v not in (None, "")), default)
 
-# ── Clients ──────────────────────────────────────────────────────────────────
+
+ANTHROPIC_API_KEY = get_setting("ANTHROPIC_API_KEY", "")
+
+# Usage caps: only questions that reach the Anthropic API count
+MAX_QUESTIONS_PER_SESSION = int(get_setting("MAX_QUESTIONS_PER_SESSION", 20))
+DAILY_QUESTION_CAP = int(get_setting("DAILY_QUESTION_CAP", 200))  # all users combined
+MAX_HISTORY_TOKENS = 20_000  # conversation history sent per request
+
+# Each browser session's documents live in memory only and are dropped
+# after this long without activity
+SESSION_TTL_SECONDS = int(get_setting("SESSION_TTL_SECONDS", 2 * 60 * 60))
+
+# ── Shared resources (one per server process) ────────────────────────────────
+
+@st.cache_resource
+def get_embed_fn():
+    return SentenceTransformerEmbeddingFunction(model_name="all-mpnet-base-v2")
+
+
+@st.cache_resource
+def get_chroma_client():
+    return chromadb.EphemeralClient()
+
+
+@st.cache_resource
+def get_session_registry() -> dict:
+    return {"last_seen": {}, "lock": threading.Lock()}
+
+
+@st.cache_resource
+def get_daily_usage() -> dict:
+    return {"date": None, "count": 0, "lock": threading.Lock()}
+
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+chroma_client = get_chroma_client()
 
-if "embed_fn" not in st.session_state:
-    st.session_state.embed_fn = SentenceTransformerEmbeddingFunction(
-        model_name="all-mpnet-base-v2"
-    )
+# ── Per-session document store ────────────────────────────────────────────────
 
-chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+if "collection_name" not in st.session_state:
+    st.session_state.collection_name = f"session-{uuid.uuid4().hex}"
+
+
+def touch_session_and_prune():
+    """Mark this session active and delete collections of sessions idle past the TTL."""
+    registry = get_session_registry()
+    now = time.time()
+    with registry["lock"]:
+        registry["last_seen"][st.session_state.collection_name] = now
+        for name, seen in list(registry["last_seen"].items()):
+            if now - seen > SESSION_TTL_SECONDS:
+                try:
+                    chroma_client.delete_collection(name)
+                except Exception:
+                    pass
+                del registry["last_seen"][name]
+
+
+touch_session_and_prune()
 collection = chroma_client.get_or_create_collection(
-    name="documents",
-    embedding_function=st.session_state.embed_fn,
+    name=st.session_state.collection_name,
+    embedding_function=get_embed_fn(),
 )
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -48,9 +104,8 @@ collection = chroma_client.get_or_create_collection(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "loaded_docs" not in st.session_state:
-    count = collection.count()
-    st.session_state.loaded_docs = count > 0
+if "questions_asked" not in st.session_state:
+    st.session_state.questions_asked = 0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,66 +120,54 @@ def build_bm25_index():
     st.session_state.bm25_metas = all_data["metadatas"]
 
 
-if "bm25_index" not in st.session_state and collection.count() > 0:
+if collection.count() == 0:
+    # New session, or this session's documents expired
+    st.session_state.bm25_index = None
+elif st.session_state.get("bm25_index") is None:
     build_bm25_index()
-
-
-def is_precise_doc(filename: str) -> bool:
-    return any(k in filename.lower() for k in ("warranty", "contract", "agreement", "terms"))
-
-
-def get_splitter(filename: str) -> RecursiveCharacterTextSplitter:
-    if is_precise_doc(filename):
-        return RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=150)
-    return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
-
-
-def extract_text(filepath: str, filename: str) -> str:
-    if filename.endswith(".txt"):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return f.read()
-
-    # PDF: extract text per page; OCR only the pages with no text layer (scanned)
-    pages = []
-    with fitz.open(filepath) as doc:
-        for page_num, page in enumerate(doc, start=1):
-            text = page.get_text()
-            if not text.strip():
-                images = convert_from_path(
-                    filepath,
-                    first_page=page_num,
-                    last_page=page_num,
-                    poppler_path=POPPLER_PATH,
-                )
-                text = "\n".join(pytesseract.image_to_string(img) for img in images)
-            pages.append(text)
-    return "\n".join(pages)
 
 
 def load_documents(uploaded_files) -> int:
+    """Uploads are written to a temp dir only for text extraction, then deleted."""
     added = 0
-    for uf in uploaded_files:
-        filepath = os.path.join(DOCS_PATH, uf.name)
-        os.makedirs(DOCS_PATH, exist_ok=True)
-        with open(filepath, "wb") as f:
-            f.write(uf.getbuffer())
-
-        text = extract_text(filepath, uf.name)
-        splitter = get_splitter(uf.name)
-        chunks = splitter.split_text(text)
-
-        strategy = "precise" if is_precise_doc(uf.name) else "narrative"
-        ids = [f"{uf.name}__chunk{i}" for i in range(len(chunks))]
-        metas = [{"source": uf.name, "chunk_strategy": strategy} for _ in chunks]
-
-        # Drop chunks from any previous version of this file before re-adding
-        collection.delete(where={"source": uf.name})
-        if chunks:
-            collection.upsert(documents=chunks, ids=ids, metadatas=metas)
-        added += len(chunks)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        for uf in uploaded_files:
+            filename = os.path.basename(uf.name)
+            filepath = os.path.join(tmp_dir, filename)
+            with open(filepath, "wb") as f:
+                f.write(uf.getbuffer())
+            added += rag_core.add_document(collection, filepath, filename)
 
     build_bm25_index()
     return added
+
+
+def clear_documents():
+    chroma_client.delete_collection(st.session_state.collection_name)
+    st.session_state.bm25_index = None
+    st.session_state.messages = []
+
+
+def questions_left() -> int:
+    return max(0, MAX_QUESTIONS_PER_SESSION - st.session_state.questions_asked)
+
+
+def reserve_api_call() -> str | None:
+    """Count one question against the usage caps. Returns a message if a cap is reached."""
+    if questions_left() == 0:
+        return (
+            f"This session has reached its limit of {MAX_QUESTIONS_PER_SESSION} questions."
+        )
+    usage = get_daily_usage()
+    with usage["lock"]:
+        today = datetime.now(timezone.utc).date()
+        if usage["date"] != today:
+            usage["date"], usage["count"] = today, 0
+        if usage["count"] >= DAILY_QUESTION_CAP:
+            return "The app has reached its daily question limit. Please try again tomorrow."
+        usage["count"] += 1
+    st.session_state.questions_asked += 1
+    return None
 
 
 def get_sources() -> list[str]:
@@ -176,7 +219,7 @@ def stream_response(
         for text in stream.text_stream:
             yield text
 
-def trim_history(messages: list, max_tokens: int = 100_000) -> list:
+def trim_history(messages: list, max_tokens: int = MAX_HISTORY_TOKENS) -> list:
     """
     Drop oldest user+assistant pairs until the history fits within max_tokens.
     Never drops below 1 pair (the most recent exchange).
@@ -208,8 +251,12 @@ with st.sidebar:
         with st.spinner("Processing..."):
             n = load_documents(uploaded_files)
         st.success(f"Added {n} chunks.")
-        st.session_state.loaded_docs = True
         st.rerun()
+
+    st.caption(
+        "Documents are private to this browser session and are not saved. "
+        "They're removed when the session ends or after 2 hours idle."
+    )
 
     st.divider()
 
@@ -230,11 +277,18 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    if all_sources and st.button("Remove all documents"):
+        clear_documents()
+        st.rerun()
+
+    st.divider()
+    st.caption(f"Questions left this session: {questions_left()} of {MAX_QUESTIONS_PER_SESSION}")
+
 # ── Main chat ─────────────────────────────────────────────────────────────────
 
 st.title("RAG Chatbot")
 
-if not st.session_state.loaded_docs:
+if collection.count() == 0:
     st.info("Upload documents in the sidebar to get started.")
     st.stop()
 
@@ -244,7 +298,10 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 # New user input
-if prompt := st.chat_input("Ask a question about your documents..."):
+if prompt := st.chat_input(
+    "Ask a question about your documents...",
+    disabled=questions_left() == 0,
+):
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -260,8 +317,14 @@ if prompt := st.chat_input("Ask a question about your documents..."):
         context_chunks, sources_found = [], []
 
     # Stream response
+    limit_message = reserve_api_call() if context_chunks else None
+
     with st.chat_message("assistant"):
-        if context_chunks:
+        if limit_message:
+            full_response = limit_message
+            sources_found = []
+            st.markdown(full_response)
+        elif context_chunks:
             api_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in st.session_state.messages
@@ -278,6 +341,9 @@ if prompt := st.chat_input("Ask a question about your documents..."):
             st.markdown(full_response)
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+    if questions_left() == 0:
+        st.info(f"That was the last of this session's {MAX_QUESTIONS_PER_SESSION} questions.")
 
     # Sources
     if sources_found:

@@ -1,10 +1,22 @@
-"""Retrieval and prompting shared by app.py and eval/run_eval.py, so the eval
-measures exactly what the app does."""
+"""Ingestion, retrieval and prompting shared by app.py and eval/run_eval.py,
+so the eval measures exactly what the app does."""
 
 from __future__ import annotations
 
 import html
+import os
 import re
+
+import fitz  # PyMuPDF
+import pytesseract
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pdf2image import convert_from_path
+
+POPPLER_PATH = r"C:\poppler\Library\bin" if os.name == "nt" else None
+
+# On Linux/cloud, tesseract is on PATH (installed via packages.txt)
+if os.name == "nt":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 MODEL = "claude-sonnet-4-5"
 N_RESULTS = 5
@@ -42,6 +54,55 @@ SYSTEM_PROMPT = (
 def tokenize(text: str) -> list[str]:
     """BM25 tokenizer for both chunks and queries: lowercase words, punctuation stripped."""
     return re.findall(r"\w+", text.lower())
+
+
+# ── Ingestion ─────────────────────────────────────────────────────────────────
+
+def is_precise_doc(filename: str) -> bool:
+    return any(k in filename.lower() for k in ("warranty", "contract", "agreement", "terms"))
+
+
+def get_splitter(filename: str) -> RecursiveCharacterTextSplitter:
+    if is_precise_doc(filename):
+        return RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=150)
+    return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+
+
+def extract_text(filepath: str, filename: str) -> str:
+    if filename.lower().endswith(".txt"):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+
+    # PDF: extract text per page; OCR only the pages with no text layer (scanned)
+    pages = []
+    with fitz.open(filepath) as doc:
+        for page_num, page in enumerate(doc, start=1):
+            text = page.get_text()
+            if not text.strip():
+                images = convert_from_path(
+                    filepath,
+                    first_page=page_num,
+                    last_page=page_num,
+                    poppler_path=POPPLER_PATH,
+                )
+                text = "\n".join(pytesseract.image_to_string(img) for img in images)
+            pages.append(text)
+    return "\n".join(pages)
+
+
+def add_document(collection, filepath: str, filename: str) -> int:
+    """Chunk a file into the collection, replacing any earlier version of it. Returns chunk count."""
+    chunks = get_splitter(filename).split_text(extract_text(filepath, filename))
+
+    strategy = "precise" if is_precise_doc(filename) else "narrative"
+    ids = [f"{filename}__chunk{i}" for i in range(len(chunks))]
+    metas = [{"source": filename, "chunk_strategy": strategy} for _ in chunks]
+
+    # Drop chunks from any previous version of this file before re-adding
+    collection.delete(where={"source": filename})
+    if chunks:
+        collection.upsert(documents=chunks, ids=ids, metadatas=metas)
+    return len(chunks)
 
 
 def build_where_filter(selected: list[str], all_sources: list[str]):
