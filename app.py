@@ -13,7 +13,13 @@ from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunct
 from dotenv import dotenv_values
 from rank_bm25 import BM25Okapi
 
+import importlib
+
 import rag_core
+
+# Streamlit reruns app.py on redeploy but keeps imported modules cached, so a
+# stale rag_core could miss new functions; reload it to always match app.py.
+rag_core = importlib.reload(rag_core)
 from rag_core import MODEL, SYSTEM_PROMPT, build_messages, tokenize
 
 
