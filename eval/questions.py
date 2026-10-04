@@ -41,11 +41,13 @@ eval_pairs = [
     # ── Out-of-scope questions — tests faithfulness (should say 'I don't know') ──
     {
         "question": "What is the price of the Aurora wallpaper?",
-        "ground_truth": "The document does not mention the price of the Aurora wallpaper."
+        "ground_truth": "The document does not mention the price of the Aurora wallpaper.",
+        "out_of_scope": True,
     },
     {
         "question": "What is the return policy if the product is damaged during shipping?",
-        "ground_truth": "The document does not mention a return policy for shipping damage."
+        "ground_truth": "The document does not mention a return policy for shipping damage.",
+        "out_of_scope": True,
     },
     {
         "question": "Who is the contact person for warranty claims?",

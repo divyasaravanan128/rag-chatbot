@@ -20,7 +20,7 @@ import pandas as pd
 from eval.questions import eval_pairs
 import rag_core
 from rag_core import (
-    MODEL, NO_MATCH_MESSAGE, SYSTEM_PROMPT, build_messages, hybrid_search, tokenize,
+    MODEL, SYSTEM_PROMPT, build_messages, hybrid_search, tokenize,
 )
 
 load_dotenv()
@@ -50,19 +50,24 @@ bm25_index = BM25Okapi([tokenize(doc) for doc in all_chunks])
 
 # ── Retrieval + answers (same code and prompt as app.py, via rag_core) ────────
 
+LOADED_SOURCES = [os.path.basename(p) for p in EVAL_DOCS]
+
+
 def retrieve(question: str) -> tuple[list[str], list[dict]]:
+    if rag_core.is_summary_request(question):
+        return rag_core.summary_chunks(collection, LOADED_SOURCES)
     return hybrid_search(question, collection, bm25_index, all_chunks, all_metas)
 
 
 def get_answer(question: str, context_chunks: list[str], sources_meta: list[dict]) -> str:
-    if not context_chunks:
-        return NO_MATCH_MESSAGE  # app shows this without calling the model
     response = anthropic_client.messages.create(
         model=MODEL,
         max_tokens=1024,
         temperature=0,
         system=SYSTEM_PROMPT,
-        messages=build_messages(context_chunks, sources_meta, [{"role": "user", "content": question}]),
+        messages=build_messages(
+            context_chunks, sources_meta, [{"role": "user", "content": question}], LOADED_SOURCES
+        ),
     )
     return response.content[0].text
 
@@ -122,11 +127,27 @@ results = evaluate(
 
 
 df = results.to_pandas()
+
+# Out-of-scope questions have a correct answer of "does not mention"; RAGAS
+# answer relevancy always scores such replies 0, so they're scored on whether
+# the bot declined instead, and answer relevancy is averaged over the rest.
+df["out_of_scope"] = [bool(p.get("out_of_scope")) for p in eval_pairs]
+answerable = df[~df["out_of_scope"]]
+declined = [
+    "does not mention" in answer.lower()
+    for answer, oos in zip(df["response"], df["out_of_scope"]) if oos
+]
+
 os.makedirs("eval", exist_ok=True)
 df.to_csv("eval/results.csv", index=False)
 
 print("\n── RAGAS Scores ──────────────────────────────")
-print(f"Faithfulness:     {df['faithfulness'].mean():.3f}")
-print(f"Answer Relevancy: {df['answer_relevancy'].mean():.3f}")
+# Faithfulness checks claims against retrieved text; "the document does not
+# mention X" is a claim about absence that no excerpt can support, so the judge
+# scores it erratically. Out-of-scope rows are covered by the decline check.
+print(f"Faithfulness:     {answerable['faithfulness'].mean():.3f}  (answerable; unscored: {answerable['faithfulness'].isna().sum()})")
+print(f"Answer Relevancy: {answerable['answer_relevancy'].mean():.3f}  ({len(answerable)} answerable questions)")
 print(f"Context Recall:   {df['context_recall'].mean():.3f}")
+print(f"Out-of-scope correctly declined: {sum(declined)}/{len(declined)}")
+print(f"(Answer Relevancy incl. out-of-scope: {df['answer_relevancy'].mean():.3f})")
 print("\nDetailed results saved to eval/results.csv")

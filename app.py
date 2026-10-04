@@ -14,7 +14,7 @@ from dotenv import dotenv_values
 from rank_bm25 import BM25Okapi
 
 import rag_core
-from rag_core import MODEL, NO_MATCH_MESSAGE, SYSTEM_PROMPT, build_messages, tokenize
+from rag_core import MODEL, SYSTEM_PROMPT, build_messages, tokenize
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -57,6 +57,11 @@ def get_embed_fn():
 @st.cache_resource
 def get_chroma_client():
     return chromadb.EphemeralClient()
+
+
+@st.cache_resource
+def get_ocr_status() -> str | None:
+    return rag_core.ocr_status()
 
 
 @st.cache_resource
@@ -214,6 +219,7 @@ def stream_response(
     context_chunks: list[str],
     sources_meta: list[dict],
     conversation_history: list[dict],
+    loaded_sources: list[str],
 ):
     """
     Generator — yields text chunks from the Anthropic streaming API.
@@ -224,7 +230,7 @@ def stream_response(
         max_tokens=1024,
         temperature=0,
         system=SYSTEM_PROMPT,
-        messages=build_messages(context_chunks, sources_meta, conversation_history),
+        messages=build_messages(context_chunks, sources_meta, conversation_history, loaded_sources),
     ) as stream:
         for text in stream.text_stream:
             yield text
@@ -256,6 +262,9 @@ with st.sidebar:
         type=["pdf", "txt"],
         accept_multiple_files=True,
     )
+
+    if ocr_problem := get_ocr_status():
+        st.warning(ocr_problem)
 
     if st.button("Load documents", disabled=not uploaded_files):
         with st.spinner("Processing..."):
@@ -324,24 +333,29 @@ if prompt := st.chat_input(
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Retrieve
-    if st.session_state.get("bm25_index") is not None:
+    # Retrieve: whole documents for summaries, hybrid search otherwise.
+    # Greetings and off-topic messages fall below the relevance threshold and
+    # get no excerpts; the model replies conversationally or declines.
+    active_sources = selected_sources or all_sources
+    is_summary = rag_core.is_summary_request(prompt)
+    if is_summary:
+        context_chunks, sources_found = rag_core.summary_chunks(collection, active_sources)
+    elif st.session_state.get("bm25_index") is not None:
         context_chunks, sources_found = hybrid_search(
             prompt, selected_sources, all_sources
         )
     else:
-        # No BM25 index means the collection is empty, so there is nothing to retrieve
         context_chunks, sources_found = [], []
 
     # Stream response
-    limit_message = reserve_api_call() if context_chunks else None
+    limit_message = reserve_api_call()
 
     with st.chat_message("assistant"):
         if limit_message:
             full_response = limit_message
             sources_found = []
             st.markdown(full_response)
-        elif context_chunks:
+        else:
             api_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in st.session_state.messages
@@ -350,12 +364,8 @@ if prompt := st.chat_input(
             api_history = trim_history(api_history)
 
             full_response = st.write_stream(
-                stream_response(context_chunks, sources_found, api_history)
+                stream_response(context_chunks, sources_found, api_history, active_sources)
             )
-        else:
-            # Relevance gate in hybrid_search found nothing close enough
-            full_response = NO_MATCH_MESSAGE
-            st.markdown(full_response)
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
 
@@ -363,7 +373,14 @@ if prompt := st.chat_input(
         st.info(f"That was the last of this session's {MAX_QUESTIONS_PER_SESSION} questions.")
 
     # Sources
-    if sources_found:
+    if sources_found and is_summary:
+        with st.expander("Sources"):
+            counts = {}
+            for meta in sources_found:
+                counts[meta.get("source", "?")] = counts.get(meta.get("source", "?"), 0) + 1
+            for source, n in counts.items():
+                st.caption(f"**{source}** · {n} chunks, in reading order")
+    elif sources_found:
         with st.expander("Sources"):
             for i, (chunk, meta) in enumerate(zip(context_chunks, sources_found)):
                 source = meta.get("source", "?")
